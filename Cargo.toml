@@ -1,3 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "crates/sframe",
+]
+
 [package]
 name = "bpfunwind"
 version = "0.1.0"
