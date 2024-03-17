@@ -2,7 +2,9 @@
 
 use bitflags::bitflags;
 use c_enum::c_enum;
+use zerocopy::{ByteOrder, FromBytes, FromZeroes, U16};
 
+pub mod v1;
 pub mod v2;
 
 /// The initial preamble structure.
@@ -10,14 +12,14 @@ pub mod v2;
 /// This is the only part of the format that is not permitted to vary between
 /// versions.
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct Preamble {
+#[derive(Copy, Clone, Debug, FromBytes, FromZeroes)]
+pub struct Preamble<O: ByteOrder> {
     /// A magic number for a SFrame section.
     ///
     /// This is defined to be 0xDEE2 (see [`MAGIC`]) but can be used to detect
     /// if the section was encoded with a different endian than the current
     /// platform.
-    pub magic: u16,
+    pub magic: U16<O>,
 
     /// The version number of this SFrame section.
     pub version: Version,
@@ -35,7 +37,7 @@ pub const MAGIC: u16 = 0xDEE2;
 c_enum! {
     /// The version of the SFrame format.
     #[repr(transparent)]
-    #[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+    #[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash, FromBytes, FromZeroes)]
     pub enum Version: u8 {
         /// First version, now obsolete.
         V1 = 1,
@@ -45,15 +47,20 @@ c_enum! {
     }
 }
 
+/// Bitflags that describe various section-wide properties.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, FromZeroes, FromBytes)]
+pub struct Flags(u8);
+
 bitflags! {
-    /// Bitflags that describe various section-wide properties.
-    #[repr(transparent)]
-    #[derive(Copy, Clone, Debug, Default)]
-    pub struct Flags: u8 {
+    impl Flags: u8 {
         /// Fucntion descriptor entries are sorted on PC.
         const FDE_SORTED = 0x1;
 
         /// Functions preserve the frame pointer.
         const FRAME_POINTER = 0x2;
+
+        // Mark all values as being valid.
+        const _ = 0xFF;
     }
 }

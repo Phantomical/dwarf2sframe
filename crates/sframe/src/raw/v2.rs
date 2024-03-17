@@ -4,6 +4,7 @@
 //! <https://sourceware.org/binutils/docs-2.41/sframe-spec.html>.
 
 use c_enum::c_enum;
+use zerocopy::{ByteOrder, FromBytes, FromZeroes, I32, U16, U32};
 
 use super::Preamble;
 
@@ -12,13 +13,13 @@ use super::Preamble;
 /// It contains things that apply to the section as a whole and offsets to the
 /// various other sub-sections defined in the format.
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct Header {
+#[derive(Copy, Clone, Debug, FromBytes, FromZeroes)]
+pub struct Header<O: ByteOrder> {
     /// The preamble for the format.
-    pub preamble: Preamble,
+    pub preamble: Preamble<O>,
 
     /// The ABI/arch identifier.
-    pub abi_arch: u8,
+    pub abi_arch: Abi,
 
     /// The CFA fixed FP offset, if any.
     pub fixed_fp_offset: i8,
@@ -30,30 +31,30 @@ pub struct Header {
     pub auxhdr_len: u8,
 
     /// The number of SFrame FDEs in the section.
-    pub num_fdes: u32,
+    pub num_fdes: U32<O>,
 
     /// The number of SFrame FREs in the section.
-    pub num_fres: u32,
+    pub num_fres: U32<O>,
 
     /// The length in bytes of the SFrame FRE sub-section.
-    pub fre_len: u32,
+    pub fre_len: U32<O>,
 
     /// The offset in bytes of the SFrame FDE sub-section.
     ///
     /// This sub-section contains `num_fdes` number of fixed-length array
     /// elements.
-    pub fdeoff: u32,
+    pub fdeoff: U32<O>,
 
     /// The offset in bytes of the SFrame FRE sub-section, which describes the
     /// stack-trace information using variable-length array elements.
-    pub freoff: u32,
+    pub freoff: U32<O>,
 }
 
 c_enum! {
     /// The ABI/arch of the target system for which the stack trace information
     /// contained in the SFrame section is intended.
-    #[derive(Copy, Clone, Eq, PartialEq)]
-    pub enum Abi: u32 {
+    #[derive(Copy, Clone, Eq, PartialEq, FromBytes, FromZeroes)]
+    pub enum Abi: u8 {
         AARCH64_ENDIAN_BIG = 1,
         AARCH64_ENDIAN_LITTLE = 2,
         AMD64_ENDIAN_LITTLE = 3,
@@ -66,13 +67,13 @@ c_enum! {
 /// contains information to describe a function's stack trace information at a
 /// high level.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default)]
-pub struct FuncDescEntry {
+#[derive(Copy, Clone, Debug, Default, FromBytes, FromZeroes)]
+pub struct FuncDescEntry<O: ByteOrder> {
     /// The virtual memory address of the described function.
-    pub func_start_address: i32,
+    pub start_address: I32<O>,
 
     /// The size of the function in bytes.
-    pub func_size: u32,
+    pub size: U32<O>,
 
     /// The offset in bytes of the function's first SFrame FRE in the sframe
     /// section.
@@ -80,24 +81,28 @@ pub struct FuncDescEntry {
     /// Note that this offset is relative to _the end of the SFrame FDE
     /// sub-section_ (unlike offsets in the SFrame header, which are relative to
     /// the _end_ of the sframe header).
-    pub func_start_fre_off: u32,
+    pub start_fre_off: U32<O>,
 
     /// The total number of FREs used for the function.
-    pub func_num_fres: u32,
+    pub num_fres: U32<O>,
 
     /// The FDE info word.
-    pub func_info: u8,
+    pub info: FdeInfo,
 
     // The size of the repetitive code block for which the
-    pub func_rep_size: u8,
+    pub rep_size: u8,
 
     // Extra padding for future fields.
-    _padding2: u16,
+    _padding2: U16<O>,
 }
 
-impl FuncDescEntry {
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, FromZeroes)]
+pub struct FdeInfo(pub u8);
+
+impl FdeInfo {
     pub fn fretype(&self) -> FreType {
-        match self.func_info & 0x7 {
+        match self.0 & 0x7 {
             0 => FreType::Addr1,
             1 => FreType::Addr2,
             2 => FreType::Addr4,
@@ -111,7 +116,7 @@ impl FuncDescEntry {
     }
 
     pub fn fdetype(&self) -> FdeType {
-        match (self.func_info >> 3) & 1 {
+        match (self.0 >> 3) & 1 {
             0 => FdeType::PcInc,
             1 => FdeType::PcMask,
             _ => unreachable!(),
@@ -120,7 +125,7 @@ impl FuncDescEntry {
 
     /// Specifies which key is used for signing the return addresses in the FDE.
     pub fn pauth_key(&self) -> Aarch64PauthKey {
-        match (self.func_info >> 4) & 1 {
+        match (self.0 >> 4) & 1 {
             0 => Aarch64PauthKey::A,
             1 => Aarch64PauthKey::B,
             _ => unreachable!(),
@@ -148,6 +153,14 @@ pub enum FdeType {
     ///
     /// `REP_BLOCK_SIZE` is the size in bytes of the repeating block of program
     /// instructions.
+    ///
+    /// > ## Note
+    /// > In the V1 SFrame specification this meant that that the start address
+    /// > should be used as a mask. So unwinders would perform
+    /// > ```text
+    /// > PC & FRE_START_ADDR_AS_MASK >= FRE_START_ADDR_AS_MASK
+    /// > ```
+    /// > to look up a matching FRE.
     PcMask = 1,
 }
 
@@ -182,27 +195,35 @@ pub enum FreType {
     _Reserved7 = 7,
 }
 
-#[repr(C, packed)]
-#[derive(Copy, Clone, Debug, Default)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, FromZeroes)]
 pub struct FrameRowEntry<T> {
     pub start_address: T,
-    pub info: u8,
+    pub info: FreInfo,
 }
 
-impl<T> FrameRowEntry<T> {
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, FromZeroes)]
+pub struct FreInfo(pub u8);
+
+impl FreInfo {
     /// Distinguish between SP or FP based CFA recovery.
-    pub fn cfa_base_reg_id(&self) -> bool {
-        self.info & 1 != 0
+    pub fn cfa_base_reg_id(&self) -> FreBaseRegId {
+        match self.0 & 1 {
+            0 => FreBaseRegId::Sp,
+            1 => FreBaseRegId::Fp,
+            _ => unreachable!(),
+        }
     }
 
     /// A value of up to 3 is allowed to track all three of CFA, FP, and RA.
     pub fn offset_count(&self) -> u8 {
-        (self.info >> 1) & 0x7
+        (self.0 >> 1) & 0x7
     }
 
     /// The size of the following stack offsets in bytes.
     pub fn offset_size(&self) -> FreOffset {
-        match (self.info >> 4) & 0x3 {
+        match (self.0 >> 4) & 0x3 {
             0 => FreOffset::_1B,
             1 => FreOffset::_2B,
             2 => FreOffset::_4B,
@@ -214,7 +235,7 @@ impl<T> FrameRowEntry<T> {
     /// Indicates whether the return address is mangled with any authorization
     /// bits (signed RA).
     pub fn mangled_ra_p(&self) -> bool {
-        (self.info >> 7) & 1 != 0
+        (self.0 >> 7) & 1 != 0
     }
 }
 
@@ -228,4 +249,11 @@ pub enum FreOffset {
 
     #[doc(hidden)]
     _Reserved3 = 3,
+}
+
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum FreBaseRegId {
+    Sp = 0,
+    Fp = 1,
 }
