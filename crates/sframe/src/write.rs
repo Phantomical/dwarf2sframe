@@ -85,11 +85,80 @@ impl SFrameBuilder {
     ///
     /// If there is an existing frame with the same start address then it will
     /// be overridden.
-    pub fn fde(&mut self, fde: FuncDescBuilder) -> &mut Self {
+    pub fn fde(&mut self, fde: FuncDescBuilder) {
         assert_eq!(self.options, fde.options);
 
         self.fdes.insert(fde.start_address, fde);
-        self
+    }
+
+    /// Attempt to merge adjacent FDEs into repeated [`v2::FdeType::PcMask`]
+    /// FDEs.
+    ///
+    /// This feature was designed to work with repetitive blocks of code, such
+    /// as program linkage tables but works fine as long as the blocks are
+    /// adjacent and their FREs are equivalent.
+    ///
+    /// This method is meant make generating such optimized SFrame sections
+    /// easier. The application can just worry about emitting unoptimized
+    /// entries and merge them after the fact.
+    pub fn merge_adjacent_fdes(&mut self) {
+        let mut address = match self.fdes.first_key_value() {
+            Some((key, _)) => *key,
+            None => return,
+        };
+
+        loop {
+            let mut iter = self.fdes.range_mut(address..);
+            let current = match iter.next() {
+                Some((_, current)) => current,
+                None => break,
+            };
+            let next = match iter.next() {
+                Some((_, next)) => next,
+                None => break,
+            };
+
+            let saved = std::mem::replace(&mut address, next.start_address);
+
+            debug_assert_eq!(current.options, next.options);
+            if current.pauth_key != next.pauth_key {
+                continue;
+            }
+
+            let relative = current.start_address - next.start_address;
+            if relative as u32 != current.size {
+                continue;
+            }
+
+            // This will emit an error when we attempt to build but we don't want to
+            // acccidentally suppress that error with a bad merge.
+            if current.size.checked_add(next.size).is_none() {
+                continue;
+            }
+
+            match (current.rep_size, next.rep_size) {
+                (Some(a), Some(b)) if a != b => continue,
+                (Some(a), None) if a as u32 != next.size => continue,
+                (None, Some(b)) if b as u32 != current.size => continue,
+                (None, None) if current.size != next.size => continue,
+                (None, None) if current.size > u8::MAX as u32 => continue,
+                _ => (),
+            }
+
+            if current.rows != next.rows {
+                continue;
+            }
+
+            current.rep_size = Some(match (current.rep_size, next.rep_size) {
+                (Some(a), _) => a,
+                (_, Some(b)) => b,
+                _ => current.size as u8,
+            });
+            current.size += next.size;
+
+            self.fdes.remove(&address);
+            address = saved;
+        }
     }
 
     pub fn build<O>(&self) -> Result<Vec<u8>, EmitError>
@@ -368,7 +437,7 @@ impl FuncDescBuilder {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FrameRowBuilder {
     start_address: u32,
     offsets: FrameRowOffsets,
@@ -411,7 +480,7 @@ impl FrameRowBuilder {
 /// header. In that case those offsets _must_ be absent in the serialized FRE.
 /// As a convenience, this library allows them to be set as long as they are
 /// equal to the values contained in the header.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FrameRowOffsets {
     /// The offset used to locate the canonical frame address (CFA).
     ///
@@ -476,11 +545,14 @@ impl FrameRowOffsets {
     }
 }
 
+/// An error emitted when building a [`FrameRowBuilder`].
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FrameRowError {
     /// The `start_address` of a [`FrameRowBuilder`] was larger than the format
     /// allows.
     ///
-    /// The SFrame format only allows address of up to 0x10000000 to be stored
+    /// The SFrame format only allows addresses of up to 0x10000000 to be stored
     /// in the format. If you have a function that is larger than 2GiB you are
     /// likely out of luck.
     ///
@@ -528,6 +600,8 @@ pub enum FrameRowError {
     DuplicateRow,
 }
 
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum EmitError {
     /// The builder contains multiple FDEs that have overlapping ranges.
     ///
