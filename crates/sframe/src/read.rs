@@ -1,8 +1,8 @@
-use std::cmp::Ordering;
-use std::iter::FusedIterator;
-use std::mem;
+use core::cmp::Ordering;
+use core::iter::FusedIterator;
+use core::{array, mem};
 
-use zerocopy::{ByteOrder, FromBytes, NativeEndian, U16, U32};
+use zerocopy::{ByteOrder, FromBytes, NativeEndian, I16, I32, U16, U32};
 
 use crate::raw::*;
 use crate::ReadError;
@@ -253,6 +253,13 @@ impl<'a, O: ByteOrder> Fde<'a, O> {
         }
     }
 
+    pub fn rep_size(&self) -> Option<u8> {
+        match self {
+            Self::V1(_) => None,
+            Self::V2(fde) => Some(fde.rep_size),
+        }
+    }
+
     pub fn fdetype(&self) -> FdeType {
         match self {
             Self::V1(fde) => match fde.info.fdetype() {
@@ -322,6 +329,13 @@ impl<'a, O: ByteOrder> FuncDescEntry<'a, O> {
         self.fde.info().pauth_key()
     }
 
+    /// The size of the repetitive block for which a FDE of type
+    /// [`FdeType::PcMask`] is used.
+    pub fn rep_block_size(&self) -> Option<u8> {
+        self.fde.rep_size()
+    }
+
+    /// Returns whether this FDE contains the requested address.
     pub fn contains(&self, address: i32) -> bool {
         let start = self.start_address();
         if address < start {
@@ -330,6 +344,69 @@ impl<'a, O: ByteOrder> FuncDescEntry<'a, O> {
 
         ((address - start) as u32) < self.size()
     }
+
+    /// Attempt to find the [FRE] for the address within this function.
+    ///
+    /// Passing an address that is outside of the bounds of this function will
+    /// return `None`.
+    ///
+    /// # Errors
+    /// Returns an error if the [FREs][FRE] referred to by this FDE could not be
+    /// parsed.
+    ///
+    /// [FRE]: FrameRowEntry
+    pub fn get_fre_for_address(
+        &self,
+        address: i32,
+    ) -> Result<Option<FrameRowEntry<'a, O>>, ReadError> {
+        if address < self.start_address() {
+            return Ok(None);
+        }
+
+        let relative = (address - self.start_address()) as u32;
+        if relative > self.size() {
+            return Ok(None);
+        }
+
+        match self.fdetype() {
+            FdeType::PcInc => {
+                for fre in self.fres() {
+                    let fre = fre?;
+
+                    if relative <= fre.start_address_offset() {
+                        return Ok(Some(fre));
+                    }
+                }
+            }
+            FdeType::PcMask => {
+                let rep_block_size = self.rep_block_size().unwrap() as u32;
+                if rep_block_size == 0 {
+                    return Err(ReadError::InvalidFdeRepBlockSize);
+                }
+
+                let modrel = relative % rep_block_size;
+                for fre in self.fres() {
+                    let fre = fre?;
+
+                    if modrel <= fre.start_address_offset() {
+                        return Ok(Some(fre));
+                    }
+                }
+            }
+            FdeType::PcMaskV1 => {
+                for fre in self.fres() {
+                    let fre = fre?;
+                    let mask = fre.start_address_offset();
+
+                    if relative & mask >= mask {
+                        return Ok(Some(fre));
+                    }
+                }
+            }
+        }
+
+        todo!()
+    }
 }
 
 pub struct FrameRowEntry<'a, O: ByteOrder = NativeEndian> {
@@ -337,7 +414,7 @@ pub struct FrameRowEntry<'a, O: ByteOrder = NativeEndian> {
 
     start_address_offset: u32,
     info: v2::FreInfo,
-    offsets: [u32; 3],
+    offsets: [i32; 3],
 }
 
 impl<'a, O: ByteOrder> FrameRowEntry<'a, O> {
@@ -374,46 +451,46 @@ impl<'a, O: ByteOrder> FrameRowEntry<'a, O> {
             ty => return Err(ReadError::UnsupportedFreType(ty)),
         };
 
-        if info.offset_count() > 3 {
+        if !(1..=3).contains(&info.offset_count()) {
             return Err(ReadError::InvalidFreOffsetCount(info.offset_count()));
         }
 
         let remaining_fres;
         let count = info.offset_count() as usize;
-        let offsets: [u32; 3] = match info.offset_size() {
+        let offsets: [i32; 3] = match info.offset_size() {
             v2::FreOffset::_1B => {
                 let (offsets, rest) =
-                    u8::slice_from_prefix(offsets, count).ok_or(ReadError::UnexpectedEof)?;
+                    i8::slice_from_prefix(offsets, count).ok_or(ReadError::UnexpectedEof)?;
                 let offsets = offsets.get(..count).ok_or(ReadError::UnexpectedEof)?;
 
                 remaining_fres = rest;
 
-                std::array::from_fn(|i| match offsets.get(i).copied() {
-                    Some(offset) => offset as u32,
+                array::from_fn(|i| match offsets.get(i).copied() {
+                    Some(offset) => offset.into(),
                     None => 0,
                 })
             }
             v2::FreOffset::_2B => {
                 let (offsets, rest) =
-                    <U16<O>>::slice_from_prefix(offsets, count).ok_or(ReadError::UnexpectedEof)?;
+                    <I16<O>>::slice_from_prefix(offsets, count).ok_or(ReadError::UnexpectedEof)?;
                 let offsets = offsets.get(..count).ok_or(ReadError::UnexpectedEof)?;
 
                 remaining_fres = rest;
 
-                std::array::from_fn(|i| match offsets.get(i).copied() {
-                    Some(offset) => offset.get() as u32,
+                array::from_fn(|i| match offsets.get(i).copied() {
+                    Some(offset) => offset.get().into(),
                     None => 0,
                 })
             }
             v2::FreOffset::_4B => {
                 let (offsets, rest) =
-                    <U32<O>>::slice_from_prefix(offsets, count).ok_or(ReadError::UnexpectedEof)?;
+                    <I32<O>>::slice_from_prefix(offsets, count).ok_or(ReadError::UnexpectedEof)?;
                 let offsets = offsets.get(..count).ok_or(ReadError::UnexpectedEof)?;
 
                 remaining_fres = rest;
 
-                std::array::from_fn(|i| match offsets.get(i).copied() {
-                    Some(offset) => offset.get() as u32,
+                array::from_fn(|i| match offsets.get(i).copied() {
+                    Some(offset) => offset.get(),
                     None => 0,
                 })
             }
@@ -452,8 +529,46 @@ impl<'a, O: ByteOrder> FrameRowEntry<'a, O> {
     }
 
     /// The offsets contained within this FRE.
-    pub fn offsets(&self) -> &[u32] {
+    pub fn offsets(&self) -> &[i32] {
         &self.offsets[..self.info.offset_count() as usize]
+    }
+
+    /// Read the register offset for the CFA.
+    pub fn cfa_offset(&self) -> Result<i32, ReadError> {
+        self.offsets
+            .get(0)
+            .copied()
+            .ok_or(ReadError::MissingFreOffset)
+    }
+
+    /// Read the register offset for the RA.
+    pub fn ra_offset(&self, sframe: &SFrame<'a, O>) -> Result<i32, ReadError> {
+        match sframe.fixed_ra_offset() {
+            Some(offset) => Ok(offset.into()),
+            None => self
+                .offsets
+                .get(1)
+                .copied()
+                .ok_or(ReadError::MissingFreOffset),
+        }
+    }
+
+    /// Read the register offset for the FP.
+    pub fn fp_offset(&self, sframe: &SFrame<'a, O>) -> Result<i32, ReadError> {
+        match sframe.fixed_fp_offset() {
+            Some(offset) => Ok(offset.into()),
+            None => {
+                let index = match sframe.fixed_ra_offset() {
+                    Some(_) => 2,
+                    None => 1,
+                };
+
+                self.offsets
+                    .get(index)
+                    .copied()
+                    .ok_or(ReadError::MissingFreOffset)
+            }
+        }
     }
 
     /// Distinguish between SP or FP based CFA recovery.
@@ -476,8 +591,8 @@ pub struct FuncDescIter<'a, O: ByteOrder = NativeEndian> {
 
 #[derive(Clone)]
 enum FuncDescIterImpl<'a, O: ByteOrder = NativeEndian> {
-    V1(std::slice::Iter<'a, v1::FuncDescEntry<O>>),
-    V2(std::slice::Iter<'a, v2::FuncDescEntry<O>>),
+    V1(core::slice::Iter<'a, v1::FuncDescEntry<O>>),
+    V2(core::slice::Iter<'a, v2::FuncDescEntry<O>>),
 }
 
 impl<'a, O: ByteOrder> Iterator for FuncDescIter<'a, O> {

@@ -24,4 +24,10 @@ pub enum ReadError {
 
     /// A FRE specified more than 3 offsets.
     InvalidFreOffsetCount(u8),
+
+    /// The FDE repeated block size had a value of 0.
+    InvalidFdeRepBlockSize,
+
+    /// An expected offset was missing from a FRE.
+    MissingFreOffset,
 }

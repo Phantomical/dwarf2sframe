@@ -2,7 +2,7 @@
 
 use bitflags::bitflags;
 use c_enum::c_enum;
-use zerocopy::{ByteOrder, FromBytes, FromZeroes, U16};
+use zerocopy::{AsBytes, ByteOrder, FromBytes, FromZeroes, Unaligned, U16};
 
 pub mod v1;
 pub mod v2;
@@ -11,8 +11,8 @@ pub mod v2;
 ///
 /// This is the only part of the format that is not permitted to vary between
 /// versions.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, FromBytes, FromZeroes)]
+#[repr(packed)]
+#[derive(Copy, Clone, Debug, AsBytes, FromBytes, FromZeroes, Unaligned)]
 pub struct Preamble<O: ByteOrder> {
     /// A magic number for a SFrame section.
     ///
@@ -37,7 +37,10 @@ pub const MAGIC: u16 = 0xDEE2;
 c_enum! {
     /// The version of the SFrame format.
     #[repr(transparent)]
-    #[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash, FromBytes, FromZeroes)]
+    #[derive(
+        Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash, AsBytes, FromBytes,
+        FromZeroes, Unaligned
+    )]
     pub enum Version: u8 {
         /// First version, now obsolete.
         V1 = 1,
@@ -49,12 +52,25 @@ c_enum! {
 
 /// Bitflags that describe various section-wide properties.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, FromZeroes, FromBytes)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    PartialOrd,
+    Ord,
+    AsBytes,
+    FromZeroes,
+    FromBytes,
+    Unaligned,
+)]
 pub struct Flags(u8);
 
 bitflags! {
     impl Flags: u8 {
-        /// Fucntion descriptor entries are sorted on PC.
+        /// Function descriptor entries are sorted on PC.
         const FDE_SORTED = 0x1;
 
         /// Functions preserve the frame pointer.

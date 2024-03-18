@@ -7,7 +7,7 @@
 //! The SFrame specification is available at
 //! <https://sourceware.org/binutils/docs-2.40/sframe-spec.html>.
 
-use zerocopy::{ByteOrder, FromBytes, FromZeroes, I32, U32};
+use zerocopy::{AsBytes, ByteOrder, FromBytes, FromZeroes, Unaligned, I32, U32};
 
 pub use super::v2::*;
 
@@ -16,8 +16,8 @@ pub use super::v2::*;
 /// The SFrame FDE sub-section is a sorted list of this struct. Each FDE
 /// contains information to describe a function's stack trace information at a
 /// high level.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, FromBytes, FromZeroes)]
+#[repr(packed)]
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes, FromZeroes, Unaligned)]
 pub struct FuncDescEntry<O: ByteOrder> {
     /// The virtual memory address of the described function.
     pub start_address: I32<O>,
