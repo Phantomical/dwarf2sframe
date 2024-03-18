@@ -296,6 +296,12 @@ pub enum FdeType {
     PcMaskV1,
 }
 
+/// A SFrame function descriptor entry (FDE).
+///
+/// A FDE contains some general info about how to unwind the function along with
+/// a sequence of [frame row entries][FrameRowEntry] (FREs). The FDE applies to
+/// the whole function whereas individual FREs describe unwinding rules for
+/// parts of the function.
 pub struct FuncDescEntry<'a, O: ByteOrder = NativeEndian> {
     fde: Fde<'a, O>,
     fres: &'a [u8],
@@ -373,7 +379,7 @@ impl<'a, O: ByteOrder> FuncDescEntry<'a, O> {
                 for fre in self.fres() {
                     let fre = fre?;
 
-                    if relative <= fre.start_address_offset() {
+                    if relative >= fre.start_address_offset() {
                         return Ok(Some(fre));
                     }
                 }
@@ -388,7 +394,7 @@ impl<'a, O: ByteOrder> FuncDescEntry<'a, O> {
                 for fre in self.fres() {
                     let fre = fre?;
 
-                    if modrel <= fre.start_address_offset() {
+                    if modrel >= fre.start_address_offset() {
                         return Ok(Some(fre));
                     }
                 }
@@ -405,10 +411,24 @@ impl<'a, O: ByteOrder> FuncDescEntry<'a, O> {
             }
         }
 
-        todo!()
+        Ok(None)
     }
 }
 
+/// A SFrame frame row entry (FRE).
+///
+/// A FRE contains the core of the stack trace information. It describes how to
+/// recover the CFA, RA, and FP from the stack frame when the IP falls within a
+/// range of instructions.
+///
+/// Once you have both the FRE and FDE for a given program counter (PC), you can
+/// get the PC for the previous frame (RA) and FP by doing the following:
+/// - `CFA = BASE_REG + fre.cfa_offset()?` (`BASE_REG` may be either `SP` or
+///   `FP` depending on the return value of [`cfa_base_reg_id`]).
+/// - `RA = CFA + fre.ra_offset(&sframe)?`
+/// - `FP = CFA + fre.fp_offset(&sframe)?`
+///
+/// [`cfa_base_reg_id`]: FrameRowEntry::cfa_base_reg_id
 pub struct FrameRowEntry<'a, O: ByteOrder = NativeEndian> {
     fde: Fde<'a, O>,
 
@@ -528,11 +548,6 @@ impl<'a, O: ByteOrder> FrameRowEntry<'a, O> {
         self.start_address_offset
     }
 
-    /// The offsets contained within this FRE.
-    pub fn offsets(&self) -> &[i32] {
-        &self.offsets[..self.info.offset_count() as usize]
-    }
-
     /// Read the register offset for the CFA.
     pub fn cfa_offset(&self) -> Result<i32, ReadError> {
         self.offsets
@@ -583,6 +598,7 @@ impl<'a, O: ByteOrder> FrameRowEntry<'a, O> {
     }
 }
 
+/// An iterator over all [`FuncDescEntry`] items within a [`SFrame`].
 #[derive(Clone)]
 pub struct FuncDescIter<'a, O: ByteOrder = NativeEndian> {
     fdes: FuncDescIterImpl<'a, O>,
@@ -649,6 +665,7 @@ impl<'a, O: ByteOrder> DoubleEndedIterator for FuncDescIter<'a, O> {
 impl<'a, O: ByteOrder> FusedIterator for FuncDescIter<'a, O> {}
 impl<'a, O: ByteOrder> ExactSizeIterator for FuncDescIter<'a, O> {}
 
+/// An iterator over all [`FrameRowEntry`] items for a [`FuncDescEntry`].
 #[derive(Clone)]
 pub struct FrameRowIter<'a, O: ByteOrder = NativeEndian> {
     fde: Fde<'a, O>,
