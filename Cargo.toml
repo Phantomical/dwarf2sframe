@@ -4,3 +4,6 @@ members = [
     ".",
     "crates/sframe",
 ]
+
+[profile.release]
+debug = 1

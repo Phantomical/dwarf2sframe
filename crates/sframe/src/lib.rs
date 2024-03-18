@@ -28,5 +28,7 @@ pub mod raw;
 mod read;
 pub mod write;
 
+pub use zerocopy::{BigEndian, LittleEndian, NativeEndian};
+
 pub use self::error::ReadError;
 pub use self::read::*;

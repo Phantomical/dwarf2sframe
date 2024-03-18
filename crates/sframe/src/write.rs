@@ -145,7 +145,7 @@ impl SFrameBuilder {
                 _ => (),
             }
 
-            if current.rows != next.rows {
+            if current.fres != next.fres {
                 continue;
             }
 
@@ -191,7 +191,7 @@ impl SFrameBuilder {
                 Err(_) => return Err(EmitError::SectionTooLarge),
             };
 
-            let max_offset = match fde.rows.last_key_value() {
+            let max_offset = match fde.fres.last_key_value() {
                 Some((_, fre)) => fre.start_address,
                 None => 0,
             };
@@ -205,13 +205,13 @@ impl SFrameBuilder {
                 _ => unreachable!("FRE offsets with value >= 0x1000000 are not permitted"),
             };
 
-            fre_count += fde.rows.len();
+            fre_count += fde.fres.len();
             let header = v2::FuncDescEntry::<O> {
                 start_address: fde.start_address.into(),
                 size: fde.size.into(),
                 start_fre_off: offset.into(),
                 num_fres: U32::new(
-                    fde.rows
+                    fde.fres
                         .len()
                         .try_into()
                         .map_err(|_| EmitError::SectionTooLarge)?,
@@ -233,7 +233,7 @@ impl SFrameBuilder {
 
             output.extend_from_slice(header.as_bytes());
 
-            for fre in fde.rows.values() {
+            for fre in fde.fres.values() {
                 let offset_ty = fre.offsets.offset_type();
 
                 let mut info = v2::FreInfo::default();
@@ -346,7 +346,7 @@ pub struct FuncDescBuilder {
     size: u32,
     rep_size: Option<u8>,
     pauth_key: v2::Aarch64PauthKey,
-    rows: BTreeMap<u32, FrameRowBuilder>,
+    fres: BTreeMap<u32, FrameRowBuilder>,
 }
 
 impl FuncDescBuilder {
@@ -357,7 +357,7 @@ impl FuncDescBuilder {
             rep_size: None,
             size,
             pauth_key: v2::Aarch64PauthKey::A,
-            rows: BTreeMap::new(),
+            fres: BTreeMap::new(),
         }
     }
 
@@ -390,6 +390,56 @@ impl FuncDescBuilder {
         match self.rep_size {
             Some(_) => v2::FdeType::PcMask,
             None => v2::FdeType::PcInc,
+        }
+    }
+
+    /// Attempt to merge adjacent identical FREs together.
+    ///
+    /// Sometimes there might be multiple sequential FREs that are identical.
+    /// These can be merged together for some free space savings. This is not
+    /// done automatically but this method can be used to do so if desired.
+    ///
+    /// Duplicate FREs are fairly easy to run into when building SFrame records
+    /// based on a source that has more detailed unwind info. Instead of
+    /// complicating the emission algorithm with it you can instead use this
+    /// method to simplify it after-the-fact.
+    pub fn merge_adjacent_fres(&mut self) {
+        let mut address = match self.fres.first_key_value() {
+            Some((key, _)) => *key,
+            None => return,
+        };
+
+        loop {
+            let mut iter = self.fres.range(address..);
+            let current = match iter.next() {
+                Some((_, current)) => current,
+                None => break,
+            };
+            let next = match iter.next() {
+                Some((_, next)) => next,
+                None => break,
+            };
+
+            let saved = std::mem::replace(&mut address, next.start_address);
+
+            let curr_za = FrameRowBuilder {
+                start_address: 0,
+                ..*current
+            };
+            let next_za = FrameRowBuilder {
+                start_address: 0,
+                ..*next
+            };
+
+            if curr_za != next_za {
+                continue;
+            }
+
+            // We don't actually have to modify either of the FREs in order to merge them.
+            // The way that FRE discovery goes means that removing the second one is
+            // equivalent to merging.
+            self.fres.remove(&address);
+            address = saved;
         }
     }
 
@@ -428,7 +478,7 @@ impl FuncDescBuilder {
             return Err(FrameRowError::MissingFpOffset);
         }
 
-        match self.rows.entry(row.start_address) {
+        match self.fres.entry(row.start_address) {
             Entry::Occupied(_) => return Err(FrameRowError::DuplicateRow),
             Entry::Vacant(entry) => entry.insert(row),
         };

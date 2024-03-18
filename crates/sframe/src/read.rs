@@ -1,6 +1,6 @@
 use core::cmp::Ordering;
 use core::iter::FusedIterator;
-use core::{array, mem};
+use core::{array, fmt, mem};
 
 use zerocopy::{ByteOrder, FromBytes, NativeEndian, I16, I32, U16, U32};
 
@@ -198,6 +198,26 @@ impl<'a, O: ByteOrder> SFrame<'a, O> {
 
         let mut iter = self.fdes();
         iter.nth(index)
+    }
+}
+
+impl<'a, O: ByteOrder> fmt::Debug for SFrame<'a, O> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct DebugFdeList<'a, 'b, O: ByteOrder>(&'b SFrame<'a, O>);
+
+        impl<'a, 'b, O: ByteOrder> fmt::Debug for DebugFdeList<'a, 'b, O> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_list().entries(self.0.fdes()).finish()
+            }
+        }
+
+        let mut dbg = f.debug_struct("SFrame");
+        dbg.field("preamble", &self.preamble);
+        dbg.field("abi_arch", &self.abi_arch);
+        dbg.field("fixed_fp_offset", &self.fixed_fp_offset());
+        dbg.field("fixed_ra_offset", &self.fixed_ra_offset());
+        dbg.field("fdes", &DebugFdeList(self));
+        dbg.finish()
     }
 }
 
@@ -415,6 +435,39 @@ impl<'a, O: ByteOrder> FuncDescEntry<'a, O> {
     }
 }
 
+impl<'a, O: ByteOrder> fmt::Debug for FuncDescEntry<'a, O> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut dbg = f.debug_struct("FuncDescEntry");
+
+        match &self.fde {
+            Fde::V1(fde) => {
+                dbg.field("start_address", &fde.start_address.get());
+                dbg.field("size", &fde.size.get());
+                dbg.field("fdetype", &fde.info.fdetype());
+                dbg.field("pauth_key", &fde.info.pauth_key());
+            }
+            Fde::V2(fde) => {
+                dbg.field("start_address", &fde.start_address.get());
+                dbg.field("size", &fde.size.get());
+                dbg.field("fdetype", &fde.info.fdetype());
+                dbg.field("pauth_key", &fde.info.pauth_key());
+                dbg.field("rep_size", &fde.rep_size);
+            }
+        }
+
+        struct DebugFreList<'a, 'b, O: ByteOrder>(&'b FuncDescEntry<'a, O>);
+
+        impl<'a, 'b, O: ByteOrder> fmt::Debug for DebugFreList<'a, 'b, O> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_list().entries(self.0.fres()).finish()
+            }
+        }
+
+        dbg.field("fres", &DebugFreList(self));
+        dbg.finish()
+    }
+}
+
 /// A SFrame frame row entry (FRE).
 ///
 /// A FRE contains the core of the stack trace information. It describes how to
@@ -429,6 +482,7 @@ impl<'a, O: ByteOrder> FuncDescEntry<'a, O> {
 /// - `FP = CFA + fre.fp_offset(&sframe)?`
 ///
 /// [`cfa_base_reg_id`]: FrameRowEntry::cfa_base_reg_id
+#[derive(Clone)]
 pub struct FrameRowEntry<'a, O: ByteOrder = NativeEndian> {
     fde: Fde<'a, O>,
 
@@ -595,6 +649,18 @@ impl<'a, O: ByteOrder> FrameRowEntry<'a, O> {
     /// bits (for signed RA).
     pub fn mangled_ra_p(&self) -> bool {
         self.info.mangled_ra_p()
+    }
+}
+
+impl<'a, O: ByteOrder> fmt::Debug for FrameRowEntry<'a, O> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let offsets = &self.offsets[..self.info.offset_count().min(3) as usize];
+        let mut dbg = f.debug_struct("FrameRowEntry");
+        dbg.field("start_address", &self.start_address_offset);
+        dbg.field("cfa_base_reg_id", &self.info.cfa_base_reg_id());
+        dbg.field("mangled_ra_p", &self.mangled_ra_p());
+        dbg.field("offsets", &offsets);
+        dbg.finish()
     }
 }
 
