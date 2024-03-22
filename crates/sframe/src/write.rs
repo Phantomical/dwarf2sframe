@@ -2,9 +2,10 @@ use alloc::collections::btree_map::Entry;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::iter::Peekable;
-use core::mem;
 use core::num::NonZeroI8;
+use core::{fmt, mem};
 
+use tinyvec::ArrayVec;
 use zerocopy::{AsBytes, ByteOrder, I16, I32, U16, U32};
 
 use crate::raw::*;
@@ -234,15 +235,32 @@ impl SFrameBuilder {
             output.extend_from_slice(header.as_bytes());
 
             for fre in fde.fres.values() {
-                let offset_ty = fre.offsets.offset_type();
+                let offset_ty = fre
+                    .offsets
+                    .map(|o| o.offset_type())
+                    .unwrap_or(FreAddrSize::U8);
+
+                let mut values = ArrayVec::<[i32; 3]>::new();
+                if let Some(offsets) = fre.offsets {
+                    values.push(offsets.cfa);
+
+                    if let Some(ra) = offsets.ra {
+                        values.push(ra);
+                    }
+
+                    if let Some(fp) = offsets.fp {
+                        values.push(fp);
+                    }
+                }
+                let offsets = &values[..];
 
                 let mut info = v2::FreInfo::default();
                 info.set_offset_size(match offset_ty {
-                    FreAddrSize::U8 => v2::FreOffset::_1B as u8,
-                    FreAddrSize::U16 => v2::FreOffset::_2B as u8,
-                    FreAddrSize::U32 => v2::FreOffset::_4B as u8,
+                    FreAddrSize::U8 => v2::FreOffset::_1B,
+                    FreAddrSize::U16 => v2::FreOffset::_2B,
+                    FreAddrSize::U32 => v2::FreOffset::_4B,
                 });
-                info.set_offset_count(fre.offsets.offset_count());
+                info.set_offset_count(offsets.len() as _);
                 info.set_cfa_base_reg_id(fre.cfa_base_reg_id);
                 info.set_mangled_ra_p(fre.mangled_ra_p);
 
@@ -272,22 +290,6 @@ impl SFrameBuilder {
                         fres.extend_from_slice(header.as_bytes());
                     }
                 }
-
-                let mut count = 1;
-                let mut offsets = [0; 3];
-                offsets[0] = fre.offsets.cfa;
-
-                if let Some(ra) = fre.offsets.ra {
-                    offsets[count] = ra;
-                    count += 1;
-                }
-
-                if let Some(fp) = fre.offsets.fp {
-                    offsets[count] = fp;
-                    count += 1;
-                }
-
-                let offsets = &offsets[..count];
 
                 match offset_ty {
                     FreAddrSize::U8 => {
@@ -454,28 +456,26 @@ impl FuncDescBuilder {
             }
         }
 
-        if let Some(fixed_ra_offset) = self.options.fixed_ra_offset {
-            let fixed_ra_offset: i32 = fixed_ra_offset.get().into();
+        if let Some(offsets) = &mut row.offsets {
+            if let Some(fixed_ra_offset) = self.options.fixed_ra_offset {
+                let fixed_ra_offset: i32 = fixed_ra_offset.get().into();
 
-            match row.offsets.ra {
-                Some(offset) if offset == fixed_ra_offset => row.offsets.ra = None,
-                Some(_) => return Err(FrameRowError::UnexpectedRaOffset),
-                None => (),
+                match offsets.ra {
+                    Some(offset) if offset == fixed_ra_offset => offsets.ra = None,
+                    Some(_) => return Err(FrameRowError::UnexpectedRaOffset),
+                    None => (),
+                }
             }
-        } else if row.offsets.ra.is_none() {
-            return Err(FrameRowError::MissingRaOffset);
-        }
 
-        if let Some(fixed_fp_offset) = self.options.fixed_fp_offset {
-            let fixed_fp_offset: i32 = fixed_fp_offset.get().into();
+            if let Some(fixed_fp_offset) = self.options.fixed_fp_offset {
+                let fixed_fp_offset: i32 = fixed_fp_offset.get().into();
 
-            match row.offsets.fp {
-                Some(offset) if offset == fixed_fp_offset => row.offsets.fp = None,
-                Some(_) => return Err(FrameRowError::UnexpectedFpOffset),
-                None => (),
+                match offsets.fp {
+                    Some(offset) if offset == fixed_fp_offset => offsets.fp = None,
+                    Some(_) => return Err(FrameRowError::UnexpectedFpOffset),
+                    None => (),
+                }
             }
-        } else if row.offsets.ra.is_none() {
-            return Err(FrameRowError::MissingFpOffset);
         }
 
         match self.fres.entry(row.start_address) {
@@ -490,7 +490,7 @@ impl FuncDescBuilder {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FrameRowBuilder {
     start_address: u32,
-    offsets: FrameRowOffsets,
+    offsets: Option<FrameRowOffsets>,
     mangled_ra_p: bool,
     cfa_base_reg_id: v2::FreBaseRegId,
 }
@@ -500,7 +500,16 @@ impl FrameRowBuilder {
         Self {
             cfa_base_reg_id: base_reg,
             start_address,
-            offsets,
+            offsets: Some(offsets),
+            mangled_ra_p: false,
+        }
+    }
+
+    pub fn invalid(start_address: u32) -> Self {
+        Self {
+            cfa_base_reg_id: v2::FreBaseRegId::Fp,
+            start_address,
+            offsets: None,
             mangled_ra_p: false,
         }
     }
@@ -579,20 +588,6 @@ impl FrameRowOffsets {
             _ => FreAddrSize::U32,
         }
     }
-
-    fn offset_count(&self) -> u8 {
-        let mut count = 1;
-
-        if self.ra.is_some() {
-            count += 1;
-        }
-
-        if self.fp.is_some() {
-            count += 1;
-        }
-
-        count
-    }
 }
 
 /// An error emitted when building a [`FrameRowBuilder`].
@@ -650,6 +645,33 @@ pub enum FrameRowError {
     DuplicateRow,
 }
 
+impl fmt::Display for FrameRowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg = match self {
+            Self::StartAddressTooLarge => "FRE start offset was larger than 0x10000000",
+            Self::StartAddressLargerThanRepSize => {
+                "FRE start offset was larger than the specified FDE repetition size"
+            }
+            Self::MissingRaOffset => "FRE was missing a required offset for the return address",
+            Self::MissingFpOffset => "FRE was missing a required offset for the frame pointer",
+            Self::UnexpectedRaOffset => {
+                "provided return address offset did not match the offset specified in the section \
+                 header"
+            }
+            Self::UnexpectedFpOffset => {
+                "provided function pointer offset did not match the one specified in the section \
+                 header"
+            }
+            Self::DuplicateRow => "FDE already contains a row with the same start address",
+        };
+
+        f.write_str(msg)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for FrameRowError {}
+
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum EmitError {
@@ -666,6 +688,22 @@ pub enum EmitError {
     /// attempting to create one is an error.
     SectionTooLarge,
 }
+
+impl fmt::Display for EmitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg = match self {
+            Self::OverlappingFdes => "multiple FDEs cover the same address ranges",
+            Self::SectionTooLarge => {
+                "sframe section length would be too large to represent offsets"
+            }
+        };
+
+        f.write_str(msg)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for EmitError {}
 
 trait PairsExt: Iterator {
     fn pairs<F, R>(self, func: F) -> Pairs<Self, F>

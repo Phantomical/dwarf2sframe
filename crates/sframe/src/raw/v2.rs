@@ -3,6 +3,8 @@
 //! The SFrame specification is available at
 //! <https://sourceware.org/binutils/docs-2.41/sframe-spec.html>.
 
+use core::fmt;
+
 use c_enum::c_enum;
 use zerocopy::{AsBytes, ByteOrder, FromBytes, FromZeroes, Unaligned, I32, U16, U32};
 
@@ -220,37 +222,43 @@ pub struct FrameRowEntry<T> {
 }
 
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes, FromZeroes, Unaligned)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes, FromZeroes, Unaligned)]
 pub struct FreInfo(pub u8);
 
 impl FreInfo {
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
     /// Distinguish between SP or FP based CFA recovery.
     pub fn cfa_base_reg_id(&self) -> FreBaseRegId {
         match self.0 & 1 {
-            0 => FreBaseRegId::Sp,
-            1 => FreBaseRegId::Fp,
+            0 => FreBaseRegId::Fp,
+            1 => FreBaseRegId::Sp,
             _ => unreachable!(),
         }
     }
 
     pub fn set_cfa_base_reg_id(&mut self, value: FreBaseRegId) {
-        self.0 &= 0xFE;
+        self.0 &= 0b11111110;
         self.0 |= value as u8;
     }
 
     /// A value of up to 3 is allowed to track all three of CFA, FP, and RA.
     pub fn offset_count(&self) -> u8 {
-        (self.0 >> 1) & 0x7
+        (self.0 >> 1) & 0b1111
     }
 
     pub fn set_offset_count(&mut self, count: u8) {
-        self.0 &= 0xE1;
-        self.0 |= (count << 1) & 0x1E;
+        assert!(count <= 0b1111);
+
+        self.0 &= 0b11100001;
+        self.0 |= (count << 1) & 0b00011110;
     }
 
     /// The size of the following stack offsets in bytes.
     pub fn offset_size(&self) -> FreOffset {
-        match (self.0 >> 4) & 0x3 {
+        match (self.0 >> 5) & 0b11 {
             0 => FreOffset::_1B,
             1 => FreOffset::_2B,
             2 => FreOffset::_4B,
@@ -259,9 +267,9 @@ impl FreInfo {
         }
     }
 
-    pub fn set_offset_size(&mut self, size: u8) {
+    pub fn set_offset_size(&mut self, size: FreOffset) {
         self.0 &= 0b10011111;
-        self.0 |= (size << 4) & 0b01100000;
+        self.0 |= ((size as u8) << 5) & 0b01100000;
     }
 
     /// Indicates whether the return address is mangled with any authorization
@@ -273,6 +281,17 @@ impl FreInfo {
     pub fn set_mangled_ra_p(&mut self, value: bool) {
         self.0 &= 0b01111111;
         self.0 |= u8::from(value) << 7;
+    }
+}
+
+impl fmt::Debug for FreInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FreInfo")
+            .field("cfa_base_reg_id", &self.cfa_base_reg_id())
+            .field("offset_count", &self.offset_count())
+            .field("offset_size", &self.offset_size())
+            .field("mangled_ra_p", &self.mangled_ra_p())
+            .finish()
     }
 }
 
@@ -291,6 +310,47 @@ pub enum FreOffset {
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum FreBaseRegId {
-    Sp = 0,
-    Fp = 1,
+    Fp = 0,
+    Sp = 1,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fre_info_roundtrip_cfa_base_reg_id() {
+        let mut info = FreInfo::new();
+        info.set_cfa_base_reg_id(FreBaseRegId::Sp);
+
+        assert_eq!(info.cfa_base_reg_id(), FreBaseRegId::Sp);
+    }
+
+    #[test]
+    fn fre_info_roundtrip_offset_count() {
+        let rt = |count| {
+            let mut info = FreInfo::new();
+            info.set_offset_count(count);
+            info.offset_count()
+        };
+
+        assert_eq!(rt(0x0), 0x0);
+        assert_eq!(rt(0x3), 0x3);
+        assert_eq!(rt(0xF), 0xF);
+    }
+
+    #[test]
+    fn fre_info_roundtrip_offset_size() {
+        let rt = |size| {
+            let mut info = FreInfo::new();
+            info.set_offset_size(size);
+            info.set_offset_count(0);
+            info.set_mangled_ra_p(false);
+            info.offset_size()
+        };
+
+        assert_eq!(rt(FreOffset::_1B), FreOffset::_1B);
+        assert_eq!(rt(FreOffset::_2B), FreOffset::_2B);
+        assert_eq!(rt(FreOffset::_4B), FreOffset::_4B);
+    }
 }

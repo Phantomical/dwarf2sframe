@@ -8,11 +8,14 @@ use crate::raw::*;
 use crate::ReadError;
 
 /// A SFrame ELF section.
-pub struct SFrame<'a, O: ByteOrder> {
+pub struct SFrame<'a, O: ByteOrder = NativeEndian> {
     preamble: Preamble<O>,
     abi_arch: v2::Abi,
     fixed_fp_offset: i8,
     fixed_ra_offset: i8,
+
+    num_fdes: u32,
+    num_fres: u32,
 
     aux: &'a [u8],
     fdes: FdeList<'a, O>,
@@ -74,7 +77,7 @@ impl<'a, O: ByteOrder> SFrame<'a, O> {
         let fres = data
             .get(
                 header.freoff.get() as usize
-                    ..header.freoff.get() as usize + header.fdeoff.get() as usize,
+                    ..header.freoff.get() as usize + header.fre_len.get() as usize,
             )
             .ok_or(ReadError::UnexpectedEof)?;
 
@@ -83,6 +86,8 @@ impl<'a, O: ByteOrder> SFrame<'a, O> {
             abi_arch: header.abi_arch,
             fixed_fp_offset: header.fixed_fp_offset,
             fixed_ra_offset: header.fixed_ra_offset,
+            num_fdes: header.num_fdes.get(),
+            num_fres: header.num_fres.get(),
             aux,
             fdes,
             fres,
@@ -139,6 +144,14 @@ impl<'a, O: ByteOrder> SFrame<'a, O> {
             0 => None,
             v => Some(v),
         }
+    }
+
+    pub fn num_fdes(&self) -> u32 {
+        self.num_fdes
+    }
+
+    pub fn num_fres(&self) -> u32 {
+        self.num_fres
     }
 
     /// Get an iterator over all the [FDEs] in this section.
@@ -216,6 +229,8 @@ impl<'a, O: ByteOrder> fmt::Debug for SFrame<'a, O> {
         dbg.field("abi_arch", &self.abi_arch);
         dbg.field("fixed_fp_offset", &self.fixed_fp_offset());
         dbg.field("fixed_ra_offset", &self.fixed_ra_offset());
+        dbg.field("num_fdes", &self.num_fdes);
+        dbg.field("num_fres", &self.num_fres);
         dbg.field("fdes", &DebugFdeList(self));
         dbg.finish()
     }
@@ -441,17 +456,27 @@ impl<'a, O: ByteOrder> fmt::Debug for FuncDescEntry<'a, O> {
 
         match &self.fde {
             Fde::V1(fde) => {
-                dbg.field("start_address", &fde.start_address.get());
+                dbg.field(
+                    "start_address",
+                    &format_args!("{:#x}", fde.start_address.get()),
+                );
                 dbg.field("size", &fde.size.get());
                 dbg.field("fdetype", &fde.info.fdetype());
                 dbg.field("pauth_key", &fde.info.pauth_key());
+                dbg.field("num_fres", &fde.num_fres.get());
+                dbg.field("start_fre_off", &fde.start_fre_off.get());
             }
             Fde::V2(fde) => {
-                dbg.field("start_address", &fde.start_address.get());
+                dbg.field(
+                    "start_address",
+                    &format_args!("{:#x}", fde.start_address.get()),
+                );
                 dbg.field("size", &fde.size.get());
                 dbg.field("fdetype", &fde.info.fdetype());
                 dbg.field("pauth_key", &fde.info.pauth_key());
                 dbg.field("rep_size", &fde.rep_size);
+                dbg.field("num_fres", &fde.num_fres.get());
+                dbg.field("start_fre_off", &fde.start_fre_off.get());
             }
         }
 
@@ -525,7 +550,7 @@ impl<'a, O: ByteOrder> FrameRowEntry<'a, O> {
             ty => return Err(ReadError::UnsupportedFreType(ty)),
         };
 
-        if !(1..=3).contains(&info.offset_count()) {
+        if !(0..=3).contains(&info.offset_count()) {
             return Err(ReadError::InvalidFreOffsetCount(info.offset_count()));
         }
 
@@ -602,9 +627,17 @@ impl<'a, O: ByteOrder> FrameRowEntry<'a, O> {
         self.start_address_offset
     }
 
+    fn offsets(&self) -> &[i32] {
+        let count = self.info.offset_count();
+        match self.offsets.get(..count as usize) {
+            Some(offsets) => offsets,
+            None => &self.offsets,
+        }
+    }
+
     /// Read the register offset for the CFA.
     pub fn cfa_offset(&self) -> Result<i32, ReadError> {
-        self.offsets
+        self.offsets()
             .get(0)
             .copied()
             .ok_or(ReadError::MissingFreOffset)
@@ -615,7 +648,7 @@ impl<'a, O: ByteOrder> FrameRowEntry<'a, O> {
         match sframe.fixed_ra_offset() {
             Some(offset) => Ok(offset.into()),
             None => self
-                .offsets
+                .offsets()
                 .get(1)
                 .copied()
                 .ok_or(ReadError::MissingFreOffset),
@@ -628,11 +661,11 @@ impl<'a, O: ByteOrder> FrameRowEntry<'a, O> {
             Some(offset) => Ok(offset.into()),
             None => {
                 let index = match sframe.fixed_ra_offset() {
-                    Some(_) => 2,
-                    None => 1,
+                    Some(_) => 1,
+                    None => 2,
                 };
 
-                self.offsets
+                self.offsets()
                     .get(index)
                     .copied()
                     .ok_or(ReadError::MissingFreOffset)
