@@ -1,9 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    ".",
-    "crates/sframe",
-]
+members = [".", "crates/*"]
 
 [profile.release]
 debug = 1
