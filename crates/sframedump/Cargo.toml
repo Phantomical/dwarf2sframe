@@ -1,0 +1,12 @@
+[package]
+name = "sframedump"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+elf-sframe = { path = "../sframe" }
+
+anyhow = "1.0.81"
+getopts = "0.2"
+object = "0.34"
+memmap2 = "0.9"
