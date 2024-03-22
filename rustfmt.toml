@@ -8,3 +8,5 @@ comment_width = 80
 # their order and granularity.
 imports_granularity = "Module"
 group_imports = "StdExternalCrate"
+
+format_strings = true
