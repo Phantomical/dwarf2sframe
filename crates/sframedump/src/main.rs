@@ -27,15 +27,19 @@ fn main() -> anyhow::Result<()> {
     let mut opts = getopts::Options::new();
     opts.optflag("h", "help", "show this help text");
 
-    let matches = opts.parse(std::env::args())?;
+    let matches = opts.parse(std::env::args().skip(1))?;
 
     if matches.opt_present("help") {
         eprintln!("{HELP}");
         return Ok(());
     }
 
-    if matches.free.len() != 1 {
+    if matches.free.is_empty() {
         anyhow::bail!("no object file input provided");
+    }
+
+    if matches.free.len() != 1 {
+        anyhow::bail!("at most one object file can be provided as an input")
     }
 
     let path = Path::new(&matches.free[0]);
