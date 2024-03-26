@@ -58,6 +58,7 @@ c_enum! {
     #[repr(transparent)]
     #[derive(Copy, Clone, Default, Eq, PartialEq, AsBytes, FromBytes, FromZeroes, Unaligned)]
     pub enum Abi: u8 {
+        INVALID = 0,
         AARCH64_ENDIAN_BIG = 1,
         AARCH64_ENDIAN_LITTLE = 2,
         AMD64_ENDIAN_LITTLE = 3,

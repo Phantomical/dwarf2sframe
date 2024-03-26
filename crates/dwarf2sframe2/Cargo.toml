@@ -1,0 +1,10 @@
+[package]
+name = "dwarf2sframe2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+elf-sframe = { path = "../sframe" }
+
+gimli = "0.28"
+
