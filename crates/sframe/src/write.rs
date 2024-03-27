@@ -456,6 +456,10 @@ impl FuncDescBuilder {
             }
         }
 
+        if row.start_address >= self.size {
+            return Err(FrameRowError::StartAddressOutsideFde);
+        }
+
         if let Some(offsets) = &mut row.offsets {
             if let Some(fixed_ra_offset) = self.options.fixed_ra_offset {
                 let fixed_ra_offset: i32 = fixed_ra_offset.get().into();
@@ -612,6 +616,10 @@ pub enum FrameRowError {
     /// a frame. As such, this is considered to be an error.
     StartAddressLargerThanRepSize,
 
+    /// The start address of a FRE falls outside the address range of the FDE it
+    /// belongs to.
+    StartAddressOutsideFde,
+
     /// The RA offset was expected to be present but `None` was provided
     /// instead.
     MissingRaOffset,
@@ -651,6 +659,9 @@ impl fmt::Display for FrameRowError {
             Self::StartAddressTooLarge => "FRE start offset was larger than 0x10000000",
             Self::StartAddressLargerThanRepSize => {
                 "FRE start offset was larger than the specified FDE repetition size"
+            }
+            Self::StartAddressOutsideFde => {
+                "FRE start address outside of the address range of its FDE"
             }
             Self::MissingRaOffset => "FRE was missing a required offset for the return address",
             Self::MissingFpOffset => "FRE was missing a required offset for the frame pointer",

@@ -14,6 +14,7 @@ use crate::display::{DisplayRegister, RegisterRule};
 pub extern crate gimli;
 
 mod display;
+mod dump;
 mod error;
 
 pub use elf_sframe::write::SFrameBuilder;
@@ -26,6 +27,7 @@ pub struct Options {
     merge_fres: bool,
     merge_fdes: bool,
     warnings: bool,
+    debugdump: bool,
     endian: Option<Endian>,
     bases: gimli::BaseAddresses,
 }
@@ -37,6 +39,7 @@ impl Options {
             merge_fdes: true,
             merge_fres: true,
             warnings: false,
+            debugdump: false,
             endian: None,
             bases,
         }
@@ -88,6 +91,17 @@ impl Options {
     /// Set the base addresses used to determine the addresses of symbols.
     pub fn bases(mut self, bases: gimli::BaseAddresses) -> Self {
         self.bases = bases;
+        self
+    }
+
+    /// Dump the dwarf FDEs as they are processed.
+    pub fn debugdump(mut self, dump: bool) -> Self {
+        self.debugdump = dump;
+        self
+    }
+
+    pub fn warnings(mut self, warnings: bool) -> Self {
+        self.warnings = warnings;
         self
     }
 }
@@ -151,7 +165,6 @@ pub fn dwarf2sframe<R: gimli::Reader>(
     let mut dwarf2sframe = Dwarf2SFrame {
         options: &options,
         sframe: SFrameBuilder::new(sfoptions),
-        warnings: Vec::new(),
     };
 
     dwarf2sframe.convert(&eh_frame)?;
@@ -167,7 +180,6 @@ pub fn dwarf2sframe<R: gimli::Reader>(
 struct Dwarf2SFrame<'a> {
     options: &'a Options,
     sframe: SFrameBuilder,
-    warnings: Vec<String>,
 }
 
 impl<'a> Dwarf2SFrame<'a> {
@@ -191,6 +203,25 @@ impl<'a> Dwarf2SFrame<'a> {
             let start_address = fde.initial_address();
             let len = fde.len();
 
+            if self.options.debugdump {
+                println!("FDE:");
+                println!(" start_address: {start_address:#010x}");
+                println!(
+                    "    range_size: {len:#010x} (end_addr = {:#010x})",
+                    start_address + len
+                );
+
+                crate::dump::dump_cfi_instructions(
+                    &mut std::io::stdout().lock(),
+                    fde.instructions(eh_frame, &self.options.bases),
+                    self.options.arch,
+                    fde.cie().encoding(),
+                )
+                .map_err(Error::InvalidDwarfFde)?;
+                println!();
+                println!("Rows:");
+            }
+
             if start_address > i32::MAX as u64 {
                 return Err(Error::InvalidStartAddress {
                     address: start_address,
@@ -211,19 +242,61 @@ impl<'a> Dwarf2SFrame<'a> {
                 .map_err(Error::InvalidUnwindTable)?;
 
             while let Some(row) = rows.next_row().map_err(Error::InvalidUnwindTable)? {
-                let fde = match self.convert_row(start_address, row) {
-                    Ok(fde) => fde,
+                if self.options.debugdump {
+                    println!(
+                        "  - offset: {:#010x} (end = {:#010x})",
+                        row.start_address(),
+                        row.end_address()
+                    );
+                    match row.cfa() {
+                        &gimli::CfaRule::RegisterAndOffset { register, offset } => println!(
+                            "    cfa:    {}{:+}",
+                            DisplayRegister::new(self.options.arch, register),
+                            offset
+                        ),
+                        gimli::CfaRule::Expression(expr) => println!("    cfa:    {expr:?}"),
+                    }
+
+                    for (reg, rule) in row.registers() {
+                        println!(
+                            "    reg:    {} = {}",
+                            DisplayRegister::new(self.options.arch, *reg),
+                            RegisterRule::new(rule, self.options.arch)
+                        );
+                    }
+                }
+
+                if row.start_address() == row.end_address() {
+                    // Some binaries have zero-width rows in their debug info. This can result in us
+                    // generating an invalid FRE whose start offset is >= fde.len. Avoid this by
+                    // skipping such entries. They cannot affect unwinding so it is safe to do so.
+                    continue;
+                }
+
+                let row_start = match u32::try_from(row.start_address() - start_address) {
+                    Ok(addr) if addr < i32::MAX as u32 => addr as u32,
+                    _ => {
+                        return Err(Error::InvalidRowOffset {
+                            address: row.start_address(),
+                            offset: row.start_address() - start_address,
+                        })
+                    }
+                };
+
+                let fre = match self.convert_row(start_address, row) {
+                    Ok(fre) => fre,
                     Err(ConvertRowError::Warning(warning)) => {
                         if self.options.warnings {
-                            self.warnings.push(warning);
+                            eprintln!("warning: {warning}");
                         }
 
-                        FrameRowBuilder::invalid(start_address as u32)
+                        FrameRowBuilder::invalid(row_start)
                     }
                     Err(ConvertRowError::Fatal(error)) => return Err(error),
                 };
 
-                if let Err(e) = sfde.row(fde) {
+                // println!("    fre:    {fre:#x?}");
+                if let Err(e) = sfde.row(fre) {
                     panic!(
                         "Generated SFrame FDE for DWARF FDE at {start_address:#x} was invalid: {e}"
                     )
@@ -232,6 +305,12 @@ impl<'a> Dwarf2SFrame<'a> {
 
             if self.options.merge_fres {
                 sfde.merge_adjacent_fres();
+            }
+
+            self.sframe.fde(sfde);
+
+            if self.options.debugdump {
+                println!();
             }
         }
 
@@ -267,10 +346,11 @@ impl<'a> Dwarf2SFrame<'a> {
         };
 
         let row_start = match u32::try_from(row.start_address() - start_address) {
-            Ok(addr) if addr < i32::MAX as u32 => start_address as u32,
+            Ok(addr) if addr < i32::MAX as u32 => addr as u32,
             _ => {
                 return Err(ConvertRowError::Fatal(Error::InvalidRowOffset {
                     address: row.start_address(),
+                    offset: row.start_address() - start_address,
                 }))
             }
         };

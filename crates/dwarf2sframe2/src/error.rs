@@ -1,5 +1,7 @@
 //! Errors for DWARF to SFrame conversion.
 
+use std::fmt;
+
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum Error {
@@ -25,7 +27,7 @@ pub enum Error {
     ///
     /// The SFrame format uses a signed 32-bit integer to represent addresses in
     /// the file so addresses larger than `i32::MAX` are not representable.
-    InvalidRowOffset { address: u64 },
+    InvalidRowOffset { address: u64, offset: u64 },
 
     /// A DWARF FDE had a length larger that was larger than `i32::MAX`.
     ///
@@ -33,9 +35,31 @@ pub enum Error {
     /// so attempting to convert info for a function with such a length will
     /// error.
     InvalidFunctionLength { address: u64, len: u64 },
-
-    /// A DWARF unwind table row had an offset larger than `i32::MAX`.
-    ///
-    /// The SFrame format does not support this so an error was emitted instead.
-    InvalidFunctionOffset { address: u64, offset: u64 },
 }
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidEhFrameEntry(e) => write!(f, "invalid .eh_frame entry: {e}"),
+            Self::InvalidDwarfFde(e) => write!(f, "invalid DWARF FDE: {e}"),
+            Self::InvalidUnwindTable(e) => write!(f, "invalid DWARF unwind table: {e}"),
+            Self::InvalidStartAddress { address } => {
+                write!(
+                    f,
+                    "DWARF FDE start address {address:#x} larger than 0x10000000"
+                )
+            }
+            Self::InvalidRowOffset { offset, .. } => {
+                write!(f, "DWARF FDE row offset {offset:#x} larger than 0x10000000")
+            }
+            Self::InvalidFunctionLength { address, len } => {
+                write!(
+                    f,
+                    "DWARF FDE for address {address:#x} had length {len:#x} larger than 0x10000000"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}

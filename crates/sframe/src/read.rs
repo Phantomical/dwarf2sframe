@@ -597,6 +597,13 @@ impl<'a, O: ByteOrder> FrameRowEntry<'a, O> {
             ty => return Err(ReadError::UnsupportedFreOffset(ty)),
         };
 
+        assert!(
+            start_address < fde.size(),
+            "Invalid FRE start address for FDE for {:#x} ({start_address} >= {})",
+            fde.start_address(),
+            fde.size()
+        );
+
         let fre = Self {
             fde,
             start_address_offset: start_address,

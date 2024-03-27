@@ -186,8 +186,12 @@ dependencies = [
 name = "dwarf2sframe2"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "clap",
  "elf-sframe",
  "gimli",
+ "memmap2",
+ "object",
 ]
 
 [[package]]
