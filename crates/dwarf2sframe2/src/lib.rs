@@ -283,7 +283,7 @@ impl<'a> Dwarf2SFrame<'a> {
                     }
                 };
 
-                let fre = match self.convert_row(start_address, row) {
+                let fre = match self.convert_row(&fde, row) {
                     Ok(fre) => fre,
                     Err(ConvertRowError::Warning(warning)) => {
                         if self.options.warnings {
@@ -319,29 +319,35 @@ impl<'a> Dwarf2SFrame<'a> {
 
     fn convert_row<R: gimli::Reader>(
         &mut self,
-        start_address: u64,
+        fde: &gimli::FrameDescriptionEntry<R>,
         row: &gimli::UnwindTableRow<R>,
     ) -> Result<FrameRowBuilder, ConvertRowError> {
         let fp = self.options.arch.fp();
         let sp = self.options.arch.sp();
         let ra = self.options.arch.ra();
 
+        let start_address = fde.initial_address();
         let (base, offset) = match row.cfa() {
             &gimli::CfaRule::RegisterAndOffset { register, offset } => match register {
                 reg if reg == sp => (FreBaseRegId::Sp, offset),
                 reg if reg == fp => (FreBaseRegId::Fp, offset),
                 reg => {
-                    return Err(self.warn(format_args!(
-                        "FDE for {start_address:#010x}: unsupported CFA source register `{}`",
-                        DisplayRegister::new(self.options.arch, reg)
-                    )));
+                    return Err(self.warn(
+                        fde,
+                        row,
+                        format_args!(
+                            "unsupported CFA source register `{}`",
+                            DisplayRegister::new(self.options.arch, reg)
+                        ),
+                    ));
                 }
             },
             gimli::CfaRule::Expression(_) => {
-                return Err(self.warn(format_args!(
-                    "FDE for {start_address:#010x}: CFA recovery rule requires evaluating a DWARF \
-                     expression",
-                )));
+                return Err(self.warn(
+                    fde,
+                    row,
+                    "CFA recovery rule requires evaluating a DWARF expression",
+                ));
             }
         };
 
@@ -358,20 +364,28 @@ impl<'a> Dwarf2SFrame<'a> {
         let offset = match i32::try_from(offset) {
             Ok(offset) => offset,
             Err(_) => {
-                return Err(self.warn(format_args!(
-                    "FDE for {start_address:#010x}: CFA register offset {offset:#x} too large to \
-                     be represented in the SFrame format"
-                )));
+                return Err(self.warn(
+                    fde,
+                    row,
+                    format_args!(
+                        "CFA register offset {offset:#x} too large to be represented in the \
+                         SFrame format"
+                    ),
+                ));
             }
         };
 
         let fp_offset = match row.register(fp) {
             gimli::RegisterRule::Offset(offset) => {
                 let offset = i32::try_from(offset).map_err(|_| {
-                    self.warn(format_args!(
-                        "FDE for {start_address:#010x}: FP register offset {offset:#x} too large \
-                         to represented in the SFrame format"
-                    ))
+                    self.warn(
+                        fde,
+                        row,
+                        format_args!(
+                            "FP register offset {offset:#x} too large to represented in the \
+                             SFrame format"
+                        ),
+                    )
                 })?;
 
                 Some(offset)
@@ -379,29 +393,41 @@ impl<'a> Dwarf2SFrame<'a> {
             gimli::RegisterRule::SameValue => None,
             gimli::RegisterRule::Undefined => None,
             rule => {
-                return Err(self.warn(format_args!(
-                    "FDE for {start_address:#010x}: Unsupport FP recovery rule: `{}`",
-                    RegisterRule::new(&rule, self.options.arch)
-                )))
+                return Err(self.warn(
+                    fde,
+                    row,
+                    format_args!(
+                        "Unsupport FP recovery rule: `{}`",
+                        RegisterRule::new(&rule, self.options.arch)
+                    ),
+                ))
             }
         };
 
         let ra_offset = match row.register(ra) {
             gimli::RegisterRule::Offset(offset) => {
                 let offset = i32::try_from(offset).map_err(|_| {
-                    self.warn(format_args!(
-                        "FDE for {start_address:#010x}: RA register offset {offset:#x} too large \
-                         to represented in the SFrame format"
-                    ))
+                    self.warn(
+                        fde,
+                        row,
+                        format_args!(
+                            "RA register offset {offset:#x} too large to represented in the \
+                             SFrame format"
+                        ),
+                    )
                 })?;
 
                 offset
             }
             rule => {
-                return Err(self.warn(format_args!(
-                    "FDE for {start_address:#010x}: Unsupport RA recovery rule: `{}`",
-                    RegisterRule::new(&rule, self.options.arch)
-                )))
+                return Err(self.warn(
+                    fde,
+                    row,
+                    format_args!(
+                        "Unsupport RA recovery rule: `{}`",
+                        RegisterRule::new(&rule, self.options.arch)
+                    ),
+                ))
             }
         };
 
@@ -414,16 +440,27 @@ impl<'a> Dwarf2SFrame<'a> {
         Ok(FrameRowBuilder::new(base, row_start, offsets))
     }
 
-    fn warn<M>(&self, message: M) -> ConvertRowError
+    fn warn<R, M>(
+        &self,
+        fde: &gimli::FrameDescriptionEntry<R>,
+        row: &gimli::UnwindTableRow<R>,
+        message: M,
+    ) -> ConvertRowError
     where
+        R: gimli::Reader,
         M: fmt::Display,
     {
-        let message = match self.options.warnings {
-            true => message.to_string(),
-            false => String::new(),
-        };
+        if !self.options.warnings {
+            return ConvertRowError::Warning(String::new());
+        }
 
-        ConvertRowError::Warning(message)
+        let start = fde.initial_address();
+        let offset = row.start_address() - start;
+        let digits = (fde.len().ilog2().div_ceil(4) + 2) as usize;
+
+        ConvertRowError::Warning(format!(
+            "FDE for {start:#010x}+{offset:#0digits$x}: {message}"
+        ))
     }
 }
 
